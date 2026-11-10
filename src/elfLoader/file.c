@@ -10,6 +10,7 @@
 #include "elfLoader.h"
 #include "file.h"
 #include "libc.h"
+#include "memory.h"
 #include "symbol.h"
 #include "../log/log.h"
 #include "../config/config.h"
@@ -288,13 +289,13 @@ char *hook_getcwd(char *buf, size_t size)
     size_t len = strlen(tmp) + 1;
     if (size > 0 && size < len)
         len = size;
-    char *aligned_ptr = (char *)_aligned_malloc(len, 16);
+    char *aligned_ptr = hook_malloc(len);
     if (aligned_ptr)
     {
         strncpy(aligned_ptr, tmp, len);
         aligned_ptr[len - 1] = '\0';
     }
-    _aligned_free(tmp);
+    free(tmp);
     return aligned_ptr;
 }
 

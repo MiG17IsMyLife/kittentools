@@ -204,9 +204,40 @@ void *reserve_address_space(size_t size, void *requestedAddr)
     return allOk ? requestedAddr : NULL;
 }
 
+#define GUEST_MALLOC_ALIGNMENT 16
+
+typedef struct
+{
+    void *base;
+    size_t size;
+    size_t capacity;
+} GuestAllocation;
+
+static void *guest_allocate(size_t size, size_t capacity, size_t alignment)
+{
+    if (alignment < GUEST_MALLOC_ALIGNMENT)
+        alignment = GUEST_MALLOC_ALIGNMENT;
+
+    size_t overhead = sizeof(GuestAllocation) + alignment - 1;
+    if (capacity > PTRDIFF_MAX || capacity > SIZE_MAX - overhead)
+    {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    void *base = malloc(overhead + capacity);
+    if (!base)
+        return NULL;
+
+    uintptr_t address = ((uintptr_t)base + overhead) & ~(uintptr_t)(alignment - 1);
+    GuestAllocation *allocation = (GuestAllocation *)address - 1;
+    *allocation = (GuestAllocation){base, size, capacity};
+    return (void *)address;
+}
+
 void *hook_malloc(size_t size)
 {
-    return _aligned_malloc(size, 16);
+    return guest_allocate(size, size, GUEST_MALLOC_ALIGNMENT);
 }
 
 struct mallinfo hook_mallinfo(void)
@@ -242,17 +273,19 @@ struct mallinfo hook_mallinfo(void)
 
 void hook_free(void *ptr)
 {
-    _aligned_free(ptr);
+    if (ptr)
+        free(((GuestAllocation *)ptr - 1)->base);
 }
 
 void *hook_calloc(size_t nmemb, size_t size)
 {
     if (nmemb != 0 && size > SIZE_MAX / nmemb)
     {
+        errno = ENOMEM;
         return NULL;
     }
     size_t total = nmemb * size;
-    void *ptr = _aligned_malloc(total, 16);
+    void *ptr = hook_malloc(total);
     if (ptr)
         memset(ptr, 0, total);
     return ptr;
@@ -260,12 +293,44 @@ void *hook_calloc(size_t nmemb, size_t size)
 
 void *hook_realloc(void *ptr, size_t size)
 {
-    return _aligned_realloc(ptr, size, 16);
+    if (!ptr)
+        return hook_malloc(size);
+    if (!size)
+    {
+        hook_free(ptr);
+        return NULL;
+    }
+
+    GuestAllocation *allocation = (GuestAllocation *)ptr - 1;
+    if (size <= allocation->capacity)
+    {
+        allocation->size = size;
+        return ptr;
+    }
+
+    /* Leave spare capacity so a series of small increases amortizes copies. */
+    size_t grown = allocation->capacity + allocation->capacity / 2;
+    void *replacement = NULL;
+    if (grown > size)
+        replacement = guest_allocate(size, grown, GUEST_MALLOC_ALIGNMENT);
+    if (!replacement)
+        replacement = hook_malloc(size);
+    if (replacement)
+    {
+        memcpy(replacement, ptr, allocation->size);
+        hook_free(ptr);
+    }
+    return replacement;
 }
 
 void *hook_memalign(size_t alignment, size_t size)
 {
-    return _aligned_malloc(size, alignment);
+    if (!alignment || (alignment & (alignment - 1)) != 0)
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+    return guest_allocate(size, size, alignment);
 }
 
 int hook_posix_memalign(void **ptr, size_t alignment, size_t size)
@@ -275,15 +340,20 @@ int hook_posix_memalign(void **ptr, size_t alignment, size_t size)
         return EINVAL;
     }
 
-    *ptr = _aligned_malloc(size, alignment);
-    return *ptr ? 0 : ENOMEM;
+    int saved_errno = errno;
+    void *result = guest_allocate(size, size, alignment);
+    errno = saved_errno;
+    if (!result)
+        return ENOMEM;
+    *ptr = result;
+    return 0;
 }
 
 char *hook_strndup(const char *src, size_t size)
 {
     size_t len = strnlen(src, size);
     len = len < size ? len : size;
-    char *dst = (char *)_aligned_malloc(len + 1, 16);
+    char *dst = (char *)hook_malloc(len + 1);
     if (!dst)
         return NULL;
     memcpy(dst, src, len);
@@ -296,7 +366,7 @@ char *hook_strdup(const char *s)
     if (!s)
         return NULL;
     size_t len = strlen(s) + 1;
-    void *ptr = _aligned_malloc(len, 16);
+    void *ptr = hook_malloc(len);
     if (ptr)
         memcpy(ptr, s, len);
     return (char *)ptr;
