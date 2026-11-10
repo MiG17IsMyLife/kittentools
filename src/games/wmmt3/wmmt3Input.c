@@ -77,16 +77,17 @@ static uint16_t gear_switches(int gear)
     }
 }
 
-static void read_switches(struct io3_switch_state *out)
+static uint8_t read_gear(void)
 {
-    memset(out, 0, sizeof(*out));
-    uint8_t buttons = 0, shifter = 0;
-    if (g_backend)
-    {
-        g_backend->jvs_read_buttons(&buttons);
-        g_backend->jvs_read_shifter(&shifter);
-    }
+    if (!g_backend)
+        return 0;
 
+    uint8_t gear;
+    if (g_backend->jvs_read_positional_gear && g_backend->jvs_read_positional_gear(&gear))
+        return gear;
+
+    uint8_t shifter = 0;
+    g_backend->jvs_read_shifter(&shifter);
     bool up = shifter & IDAS_IO_GAMEBTN_SHIFTUP;
     bool down = shifter & IDAS_IO_GAMEBTN_SHIFTDN;
     if (up && !g_shiftUpHeld && g_gear < 6)
@@ -95,6 +96,16 @@ static void read_switches(struct io3_switch_state *out)
         g_gear--;
     g_shiftUpHeld = up;
     g_shiftDownHeld = down;
+    return (uint8_t)g_gear;
+}
+
+static void read_switches(struct io3_switch_state *out)
+{
+    memset(out, 0, sizeof(*out));
+    uint8_t buttons = 0;
+    if (g_backend)
+        g_backend->jvs_read_buttons(&buttons);
+    uint8_t gear = read_gear();
 
     uint16_t navigation = 0;
     if (buttons & IDAS_IO_GAMEBTN_UP)
@@ -108,7 +119,7 @@ static void read_switches(struct io3_switch_state *out)
 
     if (navigation)
         g_gear = 0;
-    out->p1 = navigation | gear_switches(g_gear);
+    out->p1 = navigation ? navigation : gear_switches(gear);
 
     uint8_t raw[128];
     bool haveRaw = Config.io3.mode != INPUT_XINPUT && idas_di_read_buttons(raw);

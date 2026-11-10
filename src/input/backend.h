@@ -12,6 +12,8 @@ struct idas_io_analog_state {
 struct idas_io_backend {
     void (*jvs_read_buttons)(uint8_t *gamebtn);
     void (*jvs_read_shifter)(uint8_t *gear);
+    /* Returns true in positional mode and reports 0 for neutral or 1-6. */
+    bool (*jvs_read_positional_gear)(uint8_t *gear);
     void (*jvs_read_analogs)(struct idas_io_analog_state *state);
     void (*jvs_read_system)(uint8_t *sysbtn_out);
     void (*ffb_init)(void);

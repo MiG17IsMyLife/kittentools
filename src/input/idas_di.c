@@ -10,6 +10,7 @@
 static uint8_t idas_di_decode_pov(DWORD pov);
 static void idas_di_jvs_read_buttons(uint8_t *gamebtn_out);
 static void idas_di_jvs_read_shifter(uint8_t *gear_out);
+static bool idas_di_jvs_read_positional_gear(uint8_t *gear_out);
 static void idas_di_jvs_read_analogs(struct idas_io_analog_state *out);
 static void idas_di_jvs_read_system(uint8_t *sysbtn_out);
 static void idas_di_ffb_init(void);
@@ -48,6 +49,7 @@ static const struct idas_di_axis idas_di_axes[] = {
 static const struct idas_io_backend idas_di_backend = {
     .jvs_read_buttons       = idas_di_jvs_read_buttons,
     .jvs_read_shifter       = idas_di_jvs_read_shifter,
+    .jvs_read_positional_gear = idas_di_jvs_read_positional_gear,
     .jvs_read_analogs       = idas_di_jvs_read_analogs,
     .jvs_read_system        = idas_di_jvs_read_system,
     .ffb_init               = idas_di_ffb_init,
@@ -66,6 +68,8 @@ static size_t idas_di_off_brake;
 static size_t idas_di_off_accel;
 static int idas_di_shift_dn;
 static int idas_di_shift_up;
+static uint8_t idas_di_gear_buttons[6];
+static bool idas_di_positional_shifter;
 static int idas_di_view_chg;
 static int idas_di_start;
 static int idas_di_up;
@@ -418,6 +422,22 @@ HRESULT idas_di_config_apply()
     idas_di_view_chg = Config.dinput.viewChg;
     idas_di_shift_dn = Config.dinput.shiftDn;
     idas_di_shift_up = Config.dinput.shiftUp;
+
+    const int gear_buttons[] = {
+        Config.dinput.gear1, Config.dinput.gear2, Config.dinput.gear3,
+        Config.dinput.gear4, Config.dinput.gear5, Config.dinput.gear6,
+    };
+    idas_di_positional_shifter = false;
+    for (unsigned i = 0; i < _countof(gear_buttons); i++) {
+        int button = gear_buttons[i];
+        if (button < 0 || button > 128) {
+            log_warn(plfBoot, "Shifter: Invalid gear%u button %d (expected 0-128)", i + 1, button);
+            button = 0;
+        }
+        idas_di_gear_buttons[i] = (uint8_t)button;
+        idas_di_positional_shifter |= button != 0;
+    }
+
     idas_di_up = Config.dinput.up;
     idas_di_down = Config.dinput.down;
     idas_di_left = Config.dinput.left;
@@ -679,12 +699,7 @@ static void idas_di_jvs_read_shifter(uint8_t *gear_out)
 
     assert(gear_out != NULL);
 
-    IDirectInputDevice8A *dev_to_use = idas_di_dev;
-    if (idas_di_shifter != NULL) {
-        dev_to_use = idas_di_shifter;
-    }
-
-    hr = di_dev_poll(dev_to_use, &state);
+    hr = di_dev_poll(idas_di_shifter ? idas_di_shifter : idas_di_dev, &state);
 
     if (FAILED(hr)) {
         return;
@@ -699,6 +714,29 @@ static void idas_di_jvs_read_shifter(uint8_t *gear_out)
     }
 
     *gear_out = gamebtn;
+}
+
+static bool idas_di_jvs_read_positional_gear(uint8_t *gear_out)
+{
+    if (!idas_di_positional_shifter)
+        return false;
+
+    *gear_out = 0;
+    union idas_di_state state;
+    if (FAILED(di_dev_poll(idas_di_shifter ? idas_di_shifter : idas_di_dev, &state)))
+        return true;
+
+    uint8_t gear = 0;
+    for (unsigned i = 0; i < _countof(idas_di_gear_buttons); i++) {
+        uint8_t button = idas_di_gear_buttons[i];
+        if (button && (state.st.rgbButtons[button - 1] & 0x80)) {
+            if (gear)
+                return true;
+            gear = (uint8_t)(i + 1);
+        }
+    }
+    *gear_out = gear;
+    return true;
 }
 
 static void idas_di_jvs_read_analogs(struct idas_io_analog_state *out)
